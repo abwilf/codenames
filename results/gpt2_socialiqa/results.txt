@@ -1,0 +1,2 @@
+["Tracy didn't go home that evening and resisted Riley's attacks. Before, Tracy needed to make a new plan.", "Tracy didn't go home that evening and resisted Riley's attacks. Before, Tracy needed to go home and see Riley.", "Tracy didn't go home that evening and resisted Riley's attacks. Before, Tracy needed to find somewhere to go."]
+Accuracy : 0.446

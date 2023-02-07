@@ -9,6 +9,7 @@ import numpy as np
 from overrides import overrides
 from torch.nn import CrossEntropyLoss
 from transformers import RobertaTokenizer, RobertaForMaskedLM
+import sys; sys.path.append('/work/awilf/utils/'); from alex_utils import *
 
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s',
                     datefmt='%m/%d/%Y %H:%M:%S',
@@ -282,7 +283,8 @@ def main():
     else:
         out_dir = os.path.join(args.out_dir, 'roberta_'+task)
     if os.path.exists(out_dir) and os.listdir(out_dir):
-        raise ValueError("Output directory ({}) already exists and is not empty.".format(out_dir))
+        rmrf(out_dir)
+        # raise ValueError("Output directory ({}) already exists and is not empty.".format(out_dir))
     if not os.path.exists(out_dir):
         os.makedirs(out_dir)
     out_file = os.path.join(out_dir, 'predictions.jsonl')
@@ -304,7 +306,7 @@ def main():
     sample_id = 0
     with open(out_file, "w") as f_out:
         with open(args.dataset_file) as f_in:
-            for line in tqdm.tqdm(f_in):
+            for line in tqdm(f_in, total=len(read_txt(args.dataset_file).split('\n'))):
                 fields = json.loads(line.strip())
                 context, question, label, choices = \
                     instance_reader.fields_to_instance(fields)
