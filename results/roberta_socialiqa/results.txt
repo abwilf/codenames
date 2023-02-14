@@ -1,4 +1,0 @@
-"Tracy didn't go home that evening and resisted Riley's attacks."
-"Tracy didn't go home that evening and resisted Riley's attacks. Before, Tracy needed to"
-["make a new plan.", "go home and see Riley.", "find somewhere to go."]
-Accuracy: 0.473

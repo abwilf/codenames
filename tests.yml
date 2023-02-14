@@ -1,0 +1,25 @@
+program: train_gpt.py
+method: grid
+parameters:
+  # all shared parameters here
+  seed:
+    value: 42
+  max_train_steps:
+    value: 10.e+3
+  eval_every:
+    value: 2.e+2
+  _tags:
+    value: hi
+  model_name_or_path:
+    value: gpt2
+  output_dir:
+    value: /work/awilf/siqa/results/test_train
+
+  subtests:
+    train_vs_dev_early_tests2:
+      dataset_name:
+        values: 
+        - /work/awilf/siqa/tasks/socialiqa_dev.jsonl
+        - /work/awilf/siqa/tasks/orig_siqa/train.jsonl
+        - /work/awilf/siqa/tasks/orig_siqa/combined.jsonl
+
