@@ -123,7 +123,7 @@ class MovieReviewsDataset(Dataset):
 
 class Gpt2ClassificationCollator(object):
     r"""
-    Data Collator used for GPT2 in a classificaiton rask. 
+    Data Collator used for GPT2 in a classificaiton task. 
     
     It uses a given tokenizer and label encoder to convert any text and labels to numbers that 
     can go straight into a GPT2 model.

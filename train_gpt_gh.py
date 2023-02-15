@@ -62,6 +62,8 @@ from transformers.utils.versions import require_version
 from eval_gpt import eval_gpt
 from train_gpt import train_model as train_model_lm
 
+from sklearn.model_selection import train_test_split
+
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 # check_min_version("4.27.0.dev0")
 
@@ -339,7 +341,59 @@ def evaluate_model(model, testing_model, tokenizer):
     model.train()
     return acc
 
+def validate_model(model, guesser, loss_fn, valid_dataloader):
+    model.eval()
+    guesser.eval()
+    with torch.no_grad():
+        losses = []
+        for step, batch in enumerate(tqdm(valid_dataloader)):
+            loss = model_forward(model, guesser, batch, loss_fn)
+            losses.append(loss.item())
+
+    model.train()
+    guesser.train()
+    return np.mean(losses)
+
+def model_forward(model, guesser, batch, loss_fn):
+    ## get encodings of pos, neg, and hints
+    batch = {k:v.type(torch.long).to(device) for k,v in batch.items()}
+    input = {
+        **batch,
+        'return_hidden': True
+    }
+    try:
+        encodings = model(**input) # per_device_train_batch_size*(1+args.p+args.n) b/c for each sample, flattens out prompt, pos, and neg and encodes all in the same batch
+    except:
+        hi=2
+        print('ERROR WITH INFERENCE!')
+        exit()
+    this_bs = int(encodings.shape[0] / (1+args.p+args.n)) # almost always will be per_device_train_batch_size, except for edge cases
+    encodings = encodings.reshape(this_bs, (1+args.p+args.n), -1)
+    hints = encodings[:,0] # bs, hidden_dim
+    pos = encodings[:,1:(args.p+1)] # bs,args.p,hidden_dim
+    neg = encodings[:,(args.p+1):] # bs,args.n,hidden_dim
+    ##
+
+    ## run through guesser
+    # pos_hint_expansion = hints[:,None,:].repeat(1,args.p,1)
+    # neg_hint_expansion = hints[:,None,:].repeat(1,args.n,1)
+    pos_hint_expansion = hints[:,None,:].expand(-1,args.p,-1)
+    neg_hint_expansion = hints[:,None,:].expand(-1,args.n,-1)
+
+    pos_hints = torch.cat([pos_hint_expansion, pos], -1).reshape(int(this_bs*args.p), -1) # expands hints to same dim as pos, cats along last dim, reshapes to (bs*args.p, hidden_dim)
+    neg_hints = torch.cat([neg_hint_expansion, neg], -1).reshape(int(this_bs*args.n), -1) # expands hints to same dim as pos, cats along last dim, reshapes to (bs*args.p, hidden_dim)
+    guesser_input = torch.cat([pos_hints, neg_hints], 0)
+    guesser_output = guesser(guesser_input).reshape(-1) # bs*(args.p+args.n),
+
+    with torch.no_grad():
+        labels = torch.cat([torch.ones(int(this_bs*args.p)), torch.zeros(int(this_bs*args.n))])
+        labels = labels.to(device)
+
+    loss = loss_fn(guesser_output, labels)
+    return loss
+
 def main():
+    global args
     args = parse_args()
 
     if 'debug' not in args._tags:
@@ -372,8 +426,10 @@ def main():
         )
         return prompt
 
-    new_ds_name = f'{args.dataset_name}.bak.{args.N}.{args.n}.{args.p}'
-    if not exists(new_ds_name):
+    new_ds_name_base = f'{args.dataset_name}.bak.{args.N}.{args.n}.{args.p}'
+    new_ds_name_train = f'{new_ds_name_base}.train'
+    new_ds_name_valid = f'{new_ds_name_base}.valid'
+    if not exists(new_ds_name_train) or not exists(new_ds_name_valid):
         for _ in tqdm(range(args.N)):
             # choose n positives, p negatives without replacement
             group = np.random.choice(ds, size=args.n+args.p, replace=False)
@@ -386,9 +442,12 @@ def main():
                 'neg': lmap(lambda elt: str(elt), neg),
             })
             # new_ds.append([prompt, *lmap(lambda elt: str(elt), pos), *lmap(lambda elt: str(elt), neg)])
-        save_jsonl(new_ds_name, new_ds)
+        train_ds, valid_ds = train_test_split(new_ds, test_size=.2)
+        save_jsonl(new_ds_name_train, train_ds)
+        save_jsonl(new_ds_name_valid, valid_ds)
     
-    ds = load_dataset('json', data_files=new_ds_name)
+    # exit()
+    ds = load_dataset('json', data_files={'train': new_ds_name_train, 'valid': new_ds_name_valid})
     ##
 
     config = AutoConfig.from_pretrained(args.model_name_or_path)
@@ -419,6 +478,7 @@ def main():
 
     collator = Gpt2ClassificationCollator(tokenizer=tokenizer)
     train_dataloader = DataLoader(ds['train'], shuffle=True, collate_fn=collator, batch_size=args.per_device_train_batch_size )
+    valid_dataloader = DataLoader(ds['valid'], shuffle=True, collate_fn=collator, batch_size=args.per_device_train_batch_size )
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
@@ -464,41 +524,7 @@ def main():
             model.zero_grad()
             guesser.zero_grad()
 
-            ## get encodings of pos, neg, and hints
-            batch = {k:v.type(torch.long).to(device) for k,v in batch.items()}
-            input = {
-                **batch,
-                'return_hidden': True
-            }
-            try:
-                encodings = model(**input) # per_device_train_batch_size*(1+args.p+args.n) b/c for each sample, flattens out prompt, pos, and neg and encodes all in the same batch
-            except:
-                hi=2
-                print('ERROR WITH INFERENCE!')
-                exit()
-            this_bs = int(encodings.shape[0] / (1+args.p+args.n)) # almost always will be per_device_train_batch_size, except for edge cases
-            encodings = encodings.reshape(this_bs, (1+args.p+args.n), -1)
-            hints = encodings[:,0] # bs, hidden_dim
-            pos = encodings[:,1:(args.p+1)] # bs,args.p,hidden_dim
-            neg = encodings[:,(args.p+1):] # bs,args.n,hidden_dim
-            ##
-
-            ## run through guesser
-            # pos_hint_expansion = hints[:,None,:].repeat(1,args.p,1)
-            # neg_hint_expansion = hints[:,None,:].repeat(1,args.n,1)
-            pos_hint_expansion = hints[:,None,:].expand(-1,args.p,-1)
-            neg_hint_expansion = hints[:,None,:].expand(-1,args.n,-1)
-
-            pos_hints = torch.cat([pos_hint_expansion, pos], -1).reshape(int(this_bs*args.p), -1) # expands hints to same dim as pos, cats along last dim, reshapes to (bs*args.p, hidden_dim)
-            neg_hints = torch.cat([neg_hint_expansion, neg], -1).reshape(int(this_bs*args.n), -1) # expands hints to same dim as pos, cats along last dim, reshapes to (bs*args.p, hidden_dim)
-            guesser_input = torch.cat([pos_hints, neg_hints], 0)
-            guesser_output = guesser(guesser_input).reshape(-1) # bs*(args.p+args.n),
-
-            with torch.no_grad():
-                labels = torch.cat([torch.ones(int(this_bs*args.p)), torch.zeros(int(this_bs*args.n))])
-                labels = labels.to(device)
-
-            loss = loss_fn(guesser_output, labels)
+            loss = model_forward(model, guesser, batch, loss_fn)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             torch.nn.utils.clip_grad_norm_(guesser.parameters(), 1.0)
@@ -513,20 +539,25 @@ def main():
             eval_interval_steps += 1
 
             # run clm before evaluation
-            if completed_steps%args.run_clm_every==0:
-                testing_model.transformer = model.transformer
-                testing_model = train_model_lm(args, model_in=testing_model)
-                model = model.to(device)
+            # if completed_steps%args.run_clm_every==0:
+            #     testing_model.transformer = model.transformer
+            #     testing_model = train_model_lm(args, model_in=testing_model)
+            #     model = model.to(device)
 
             # evaluate
             if completed_steps%args.eval_every==0:
                 with torch.no_grad():
+                    valid_loss = validate_model(model, guesser, loss_fn, valid_dataloader)
                     # acc = evaluate_model(model, testing_model, tokenizer)
                     total_loss /= eval_interval_steps
                     eval_interval_steps = 0
+                    print('valid_loss', valid_loss)
+                    print('train_loss', total_loss)
+
                     if 'debug' not in args._tags:
                         wandb.log({
                             # 'eval_acc': acc,
+                            'valid_loss': valid_loss,
                             'train_loss': total_loss,
                         }, step=completed_steps)
                     
@@ -539,9 +570,9 @@ def main():
         if break_signal:
             break
 
-    acc = evaluate_model(model, testing_model, tokenizer)
-    if 'debug' not in args._tags:
-        wandb.summary['acc'] = acc
+    # acc = evaluate_model(model, testing_model, tokenizer)
+    # if 'debug' not in args._tags:
+    #     wandb.summary['acc'] = acc
 
     if args.output_dir is not None:
         accelerator.wait_for_everyone()
