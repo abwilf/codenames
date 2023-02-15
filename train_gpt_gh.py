@@ -60,6 +60,7 @@ from transformers.utils import check_min_version, get_full_repo_name, send_examp
 from transformers.utils.versions import require_version
 
 from eval_gpt import eval_gpt
+from train_gpt import train_model as train_model_lm
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 # check_min_version("4.27.0.dev0")
@@ -84,6 +85,12 @@ def parse_args():
         help="Number of datapoints to generate",
     )
     parser.add_argument(
+        "--np",
+        type=int,
+        default=-1,
+        help="Set > 1 if you want n and p to be the same. Overrides n and p",
+    )
+    parser.add_argument(
         "--n",
         type=int,
         default=1,
@@ -94,6 +101,24 @@ def parse_args():
         type=int,
         default=2,
         help="Number of elements in the positive set",
+    )
+    parser.add_argument(
+        "--run_clm_every",
+        type=int,
+        default=100,
+        help="Number of datapoints to generate",
+    )
+    parser.add_argument(
+        "--clm_max_train_steps",
+        type=int,
+        default=500,
+        help="Number of datapoints to generate",
+    )
+    parser.add_argument(
+        "--clm_freeze_enc",
+        type=int,
+        default=1,
+        help="Freeze encoder during clm",
     )
     ## end GH specific
 
@@ -261,6 +286,9 @@ def parse_args():
     args.max_train_steps = int(args.max_train_steps)
     args.eval_every = int(args.eval_every)
     args.N = int(args.N)
+    if args.np > 1:
+        args.n = args.np
+        args.p = args.np
 
     # Sanity checks
     if args.dataset_name is None and args.train_file is None and args.validation_file is None:
@@ -274,7 +302,6 @@ def parse_args():
             assert extension in ["csv", "json", "txt"], "`validation_file` should be a csv, json or txt file."
 
     return args
-
 
 class Gpt2ClassificationCollator(object):
     def __init__(self, tokenizer, max_sequence_len=None):
@@ -318,7 +345,7 @@ def main():
     if 'debug' not in args._tags:
         wandb.init(
             project='siqa',
-            entity='socialiq', 
+            entity='socialiq',
             config=vars(args),
             tags=args._tags.split(','),
         )
@@ -419,22 +446,7 @@ def main():
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    # Prepare everything with our `accelerator`.
-    # model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
-    #     model, optimizer, train_dataloader, None, lr_scheduler
-    # )
-
     # Train!
-    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
-
-    logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataloader)}")
-    # logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
-    # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
     completed_steps = 0
 
@@ -500,15 +512,21 @@ def main():
             completed_steps += 1
             eval_interval_steps += 1
 
+            # run clm before evaluation
+            if completed_steps%args.run_clm_every==0:
+                testing_model.transformer = model.transformer
+                testing_model = train_model_lm(args, model_in=testing_model)
+                model = model.to(device)
+
             # evaluate
             if completed_steps%args.eval_every==0:
                 with torch.no_grad():
-                    acc = evaluate_model(model, testing_model, tokenizer)
+                    # acc = evaluate_model(model, testing_model, tokenizer)
                     total_loss /= eval_interval_steps
                     eval_interval_steps = 0
                     if 'debug' not in args._tags:
                         wandb.log({
-                            'eval_acc': acc,
+                            # 'eval_acc': acc,
                             'train_loss': total_loss,
                         }, step=completed_steps)
                     

@@ -93,6 +93,12 @@ def parse_args():
         "--eval_every", type=float, default=100, help="Evaluate zero shot every eval_every batches of training"
     )
     parser.add_argument(
+        "--clm_freeze_enc",
+        type=int,
+        default=1,
+        help="Freeze encoder during clm",
+    )
+    parser.add_argument(
         "--validation_split_percentage",
         default=5,
         help="The percentage of the train set used as validation set in case there's no validation split",
@@ -141,7 +147,7 @@ def parse_args():
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay to use.")
     parser.add_argument("--num_train_epochs", type=int, default=3, help="Total number of training epochs to perform.")
     parser.add_argument(
-        "--max_train_steps",
+        "--clm_max_train_steps",
         type=float,
         default=400,
         help="Total number of training steps to perform. If provided, overrides num_train_epochs.",
@@ -232,7 +238,7 @@ def parse_args():
     )
     args = parser.parse_args()
 
-    args.max_train_steps = int(args.max_train_steps)
+    args.clm_max_train_steps = int(args.clm_max_train_steps)
     args.eval_every = int(args.eval_every)
 
     # Sanity checks
@@ -248,17 +254,7 @@ def parse_args():
 
     return args
 
-
-def main():
-    args = parse_args()
-
-    if 'debug' not in args._tags:
-        wandb.init(
-            project='siqa',
-            entity='socialiq', 
-            config=vars(args),
-            tags=args._tags.split(','),
-        )
+def train_model(args, model_in=None):
     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
     # send_example_telemetry("run_clm_no_trainer", args)
@@ -325,8 +321,7 @@ def main():
     #     )
     
     # # // "--dataset_name", , "--dataset_config_name", , 
-
-    ds = load_dataset("wikitext", "wikitext-2-raw-v1")
+    # ds = load_dataset("wikitext", "wikitext-2-raw-v1")
 
     ds = load_dataset('json', data_files=args.dataset_name)
     ds = ds.rename_column('context', 'text')
@@ -369,6 +364,12 @@ def main():
         logger.info("Training new model from scratch")
         model = AutoModelForCausalLM.from_config(config)
 
+    if model_in is not None:
+        model = model_in
+        if args.clm_freeze_enc:
+            for param in model.transformer.parameters():
+                param.requires_grad = False
+    
     # We resize the embeddings only when necessary to avoid index errors. If you are creating a model from scratch
     # on a small vocab and want a smaller embedding size, remove this test.
     embedding_size = model.get_input_embeddings().weight.shape[0]
@@ -470,17 +471,17 @@ def main():
     optimizer = torch.optim.AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
 
     # Scheduler and math around the number of training steps.
-    # overrode_max_train_steps = False
+    # overrode_clm_max_train_steps = False
     # num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    # if args.max_train_steps is None:
-    #     args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
-    #     overrode_max_train_steps = True
+    # if args.clm_max_train_steps is None:
+    #     args.clm_max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+    #     overrode_clm_max_train_steps = True
 
     lr_scheduler = get_scheduler(
         name=args.lr_scheduler_type,
         optimizer=optimizer,
         num_warmup_steps=args.num_warmup_steps * args.gradient_accumulation_steps,
-        num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
+        num_training_steps=args.clm_max_train_steps * args.gradient_accumulation_steps,
     )
 
     # Prepare everything with our `accelerator`.
@@ -490,10 +491,10 @@ def main():
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     # num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    # if overrode_max_train_steps:
-    #     args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+    # if overrode_clm_max_train_steps:
+    #     args.clm_max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
     # Afterwards we recalculate our number of training epochs
-    # args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+    # args.num_train_epochs = math.ceil(args.clm_max_train_steps / num_update_steps_per_epoch)
 
     # Figure out how many steps we should save the Accelerator states
     checkpointing_steps = args.checkpointing_steps
@@ -517,9 +518,9 @@ def main():
     logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
+    logger.info(f"  Total optimization steps = {args.clm_max_train_steps}")
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(range(args.clm_max_train_steps), disable=not accelerator.is_local_main_process)
     completed_steps = 0
     starting_epoch = 0
 
@@ -570,9 +571,9 @@ def main():
     completed_steps = 0
     eval_interval_steps = 0
     
-    for _ in range(int(1e8)): # large number of "epochs" - we're just using max_train_steps
+    for _ in range(int(1e8)): # large number of "epochs" - we're just using clm_max_train_steps
         break_signal = False
-        for step, batch in enumerate(train_dataloader):
+        for _, batch in enumerate(train_dataloader):
             ## train
             with accelerator.accumulate(model):
                 outputs = model(**batch)
@@ -602,7 +603,7 @@ def main():
                 
                 total_loss = 0
 
-            if completed_steps >= args.max_train_steps:
+            if completed_steps >= args.clm_max_train_steps:
                 break_signal = True
                 break
         
@@ -621,6 +622,21 @@ def main():
         )
         if accelerator.is_main_process:
             tokenizer.save_pretrained(args.output_dir)
-        
+    
+    return model
+
+def main():
+    args = parse_args()
+
+    if 'debug' not in args._tags:
+        wandb.init(
+            project='siqa',
+            entity='socialiq', 
+            config=vars(args),
+            tags=args._tags.split(','),
+        )
+    
+    train_model(args)
+
 if __name__ == "__main__":
     main()

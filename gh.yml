@@ -10,31 +10,93 @@ parameters:
     value: /work/awilf/siqa/results/test_train
 
   subtests:
-    gh,all_trainable:
-      dataset_name:
-        values:
-        # - /work/awilf/siqa/tasks/socialiqa_dev.jsonl
-        - /work/awilf/siqa/tasks/orig_siqa/train.jsonl
-        # - /work/awilf/siqa/tasks/orig_siqa/combined.jsonl
+    # gh,clm_every2:
+    #   dataset_name:
+    #     values:
+    #     # - /work/awilf/siqa/tasks/socialiqa_dev.jsonl
+    #     - /work/awilf/siqa/tasks/orig_siqa/train.jsonl
+    #     # - /work/awilf/siqa/tasks/orig_siqa/combined.jsonl
+
+    #   clm_freeze_enc:
+    #     value: 1
+
+    #   run_clm_every:
+    #     values: 
+    #     - 100
+    #     - 200
+    #     - 1000
       
+    #   clm_max_train_steps:
+    #     values: 
+    #     - 100
+    #     - 200
+    #     - 500
+
+    #   N:
+    #     value: 1.e+5
+      
+    #   max_train_steps:
+    #     value: 1.e+4
+      
+    #   eval_every:
+    #     value: 2.e+2
+
+    #   n:
+    #     values:
+    #     - 1
+    #     # - 2
+    #     # - 3
+    #     # - 4
+      
+    #   p:
+    #     values:
+    #     - 2
+    #     # - 3
+    #     # - 4
+    #     # - 5
+      
+    gh,np:
+      dataset_name:
+        value: /work/awilf/siqa/tasks/orig_siqa/train.jsonl
+
+      clm_freeze_enc:
+        value: 1
+
+      learning_rate:
+        values:
+        - 2.e-5
+        - 3.e-5
+        - 5.e-5
+      
+      run_clm_every:
+        values:
+        - 100000
+        # - 200
+        # - 1000
+      
+      # clm_max_train_steps:
+      #   values: 
+      #   - 100
+      #   - 200
+      #   - 500
+
       N:
-        value: 1.e+5
+        values: 
+        - 1.e+2
+        - 1.e+3
+        - 1.e+4
+        - 1.e+5
       
       max_train_steps:
         value: 1.e+4
       
       eval_every:
-        value: 2.e+2
+        value: 1.e+2
 
-      n:
-        values:
-        - 1
-        - 2
-        - 3
-      
-      p:
+      np:
         values:
         - 2
         - 3
         - 4
+        - 5
       
