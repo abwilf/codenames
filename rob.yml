@@ -1,0 +1,149 @@
+program: train_rob_gh.py
+method: grid
+parameters:
+  # all shared parameters here
+  seed:
+    value: 42
+  output_dir:
+    value: /work/awilf/siqa/results/test_train
+  max_length:
+    value: 128
+  model_name_or_path:
+    value: roberta-base
+  per_device_train_batch_size:
+    value: 32
+  dataset_name:
+    value: /work/awilf/siqa/tasks/orig_siqa/train.jsonl
+  log_every:
+    value: 200
+  n:
+    value: 1
+  p:
+    value: 1
+  gen_data_only:
+    value: 0
+  
+  subtests:
+    gh,rob2,hinter_drop:
+      learning_rate:
+        values:
+        # - 2.e-5
+        # - 3.e-5
+        - 5.e-5
+
+      num_train_epochs:
+        value: 10
+
+      N:
+        values: 
+        # - 1.e+1
+        # - 5.e+1
+        # - 1.e+2
+        # - 5.e+2
+        # - 1.e+3
+        - 2.e+3
+      
+      guesser_drop:
+        values:
+        - .1
+        # - .2
+        # - .5
+        # - .7
+      
+      hinter_drop:
+        values:
+        # - .1
+        - .2
+        # - .3
+        - .4
+        - .5
+        - .7
+      
+      hinter_dim:
+        values:
+        - 100
+        # - 500
+
+    gh,rob2,guesser_drop:
+      learning_rate:
+        values:
+        # - 2.e-5
+        # - 3.e-5
+        - 5.e-5
+
+      num_train_epochs:
+        value: 10
+
+      N:
+        values: 
+        # - 1.e+1
+        # - 5.e+1
+        # - 1.e+2
+        # - 5.e+2
+        # - 1.e+3
+        - 2.e+3
+      
+      guesser_drop:
+        values:
+        - .1
+        - .2
+        - .5
+        - .7
+      
+      hinter_drop:
+        values:
+        # - .1
+        - .2
+        # - .3
+        # - .4
+        # - .5
+        # - .7
+      
+      hinter_dim:
+        values:
+        - 100
+        # - 500
+
+
+    gh,rob2,hinter_dim:
+      learning_rate:
+        values:
+        # - 2.e-5
+        # - 3.e-5
+        - 5.e-5
+
+      num_train_epochs:
+        value: 10
+
+      N:
+        values: 
+        # - 1.e+1
+        # - 5.e+1
+        # - 1.e+2
+        # - 5.e+2
+        # - 1.e+3
+        - 2.e+3
+      
+      guesser_drop:
+        values:
+        - .1
+        # - .2
+        # - .5
+        # - .7
+      
+      hinter_drop:
+        values:
+        # - .1
+        - .2
+        # - .3
+        # - .4
+        # - .5
+        # - .7
+      
+      hinter_dim:
+        values:
+        - 25
+        - 50
+        - 100
+        - 500
+

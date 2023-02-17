@@ -23,6 +23,7 @@ import os
 import random
 from pathlib import Path
 
+from torch import nn
 import datasets
 import evaluate
 import torch
@@ -33,7 +34,7 @@ from datasets import load_dataset
 from huggingface_hub import Repository, create_repo
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-
+from sklearn.model_selection import train_test_split
 import transformers
 from transformers import (
     AutoConfig,
@@ -44,9 +45,11 @@ from transformers import (
     SchedulerType,
     default_data_collator,
     get_scheduler,
+    RobertaForSequenceClassification
 )
 from transformers.utils import check_min_version, get_full_repo_name, send_example_telemetry
 from transformers.utils.versions import require_version
+# from modeling_roberta import RobertaForSequenceClassification
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
 # check_min_version("4.27.0.dev0")
@@ -84,6 +87,30 @@ def parse_args():
         help="Number of datapoints to generate",
     )
     parser.add_argument(
+        "--hinter_dim",
+        type=int,
+        default=100,
+        help="",
+    )
+    parser.add_argument(
+        "--gen_data_only",
+        type=int,
+        default=0,
+        help="if you only want to generate the data, not run training",
+    )
+    parser.add_argument(
+        "--hinter_drop",
+        type=float,
+        default=.2,
+        help="",
+    )
+    parser.add_argument(
+        "--guesser_drop",
+        type=float,
+        default=.2,
+        help="",
+    )
+    parser.add_argument(
         "--np",
         type=int,
         default=-1,
@@ -108,7 +135,7 @@ def parse_args():
         help="Number of elements in the positive set",
     )
     parser.add_argument(
-        "--run_clm_every",
+        "--log_every",
         type=int,
         default=100,
         help="Number of datapoints to generate",
@@ -134,13 +161,6 @@ def parse_args():
         help="The name of the dataset to use (via the datasets library).",
     )
 
-    parser.add_argument(
-        "--task_name",
-        type=str,
-        default=None,
-        help="The name of the glue task to train on.",
-        choices=list(task_to_keys.keys()),
-    )
     parser.add_argument(
         "--train_file", type=str, default=None, help="A csv or a json file containing the training data."
     )
@@ -239,6 +259,12 @@ def parse_args():
         help="Whether or not to enable to load a pretrained model whose head dimensions are different.",
     )
     args = parser.parse_args()
+    
+    args.N = int(args.N)
+    if args.np > 1:
+        args.n = args.np
+        args.p = args.np
+
     return args
 
 
@@ -258,123 +284,90 @@ def main():
         )
 
     ## LOAD DATASET
-    if args.task_name is not None:
-        # Downloading and loading a dataset from the hub.
-        raw_datasets = load_dataset("glue", args.task_name)
-    else:
-        # Loading the dataset from local csv or json file.
-        data_files = {}
-        if args.train_file is not None:
-            data_files["train"] = args.train_file
-        if args.validation_file is not None:
-            data_files["validation"] = args.validation_file
-        extension = (args.train_file if args.train_file is not None else args.validation_file).split(".")[-1]
-        raw_datasets = load_dataset(extension, data_files=data_files)
-    # See more about loading any type of standard or custom dataset at
-    # https://huggingface.co/docs/datasets/loading_datasets.html.
+    ds = load_jsonl(args.dataset_name)
+    ds = arlmap(lambda elt: elt['context'], ds)
+    new_ds = []
 
-    # Labels
-    if args.task_name is not None:
-        is_regression = args.task_name == "stsb"
-        if not is_regression:
-            label_list = raw_datasets["train"].features["label"].names
-            num_labels = len(label_list)
-        else:
-            num_labels = 1
-    else:
-        # Trying to have good defaults here, don't hesitate to tweak to your needs.
-        is_regression = raw_datasets["train"].features["label"].dtype in ["float32", "float64"]
-        if is_regression:
-            num_labels = 1
-        else:
-            # A useful fast method:
-            # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.unique
-            label_list = raw_datasets["train"].unique("label")
-            label_list.sort()  # Let's sort it for determinism
-            num_labels = len(label_list)
+    new_ds_name_base = f'{args.dataset_name}.bak.{args.N}.{args.n}.{args.p}'
+    new_ds_name_train = f'{new_ds_name_base}.train'
+    new_ds_name_valid = f'{new_ds_name_base}.valid'
+    
+    if True:
+    # if not exists(new_ds_name_train) or not exists(new_ds_name_valid):
+        for _ in tqdm(range(args.N)):
+            # choose n positives, p negatives without replacement
+            group = np.random.choice(ds, size=args.n+args.p, replace=False)
+            pos = group[:args.p]
+            neg = group[args.p:]
+
+            new_ds.append({
+                'pos': lmap(lambda elt: str(elt), pos),
+                'neg': lmap(lambda elt: str(elt), neg),
+            })
+            # new_ds.append([prompt, *lmap(lambda elt: str(elt), pos), *lmap(lambda elt: str(elt), neg)])
+        train_ds, valid_ds = train_test_split(new_ds, test_size=.2)
+        save_jsonl(new_ds_name_train, train_ds)
+        save_jsonl(new_ds_name_valid, valid_ds)
+    
+    if args.gen_data_only:
+        exit()
+    ds = load_dataset('json', data_files={'train': new_ds_name_train, 'valid': new_ds_name_valid})
+    ##
 
     # Load pretrained model and tokenizer
-    config = AutoConfig.from_pretrained(args.model_name_or_path, num_labels=num_labels)
+    config = AutoConfig.from_pretrained(args.model_name_or_path, num_labels=1)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path, use_fast=not args.use_slow_tokenizer)
+    args.hidden_size = config.hidden_size
     model = AutoModelForSequenceClassification.from_pretrained(
         args.model_name_or_path,
         config=config,
         ignore_mismatched_sizes=args.ignore_mismatched_sizes,
     )
+    guesser = nn.Sequential(
+        nn.Linear(config.hidden_size+args.hinter_dim, 1, bias=True),
+        nn.Dropout(args.guesser_drop),
+        nn.Sigmoid(),
+    )
+    hinter = nn.Sequential(
+        nn.Linear(config.hidden_size*(args.p+args.n), args.hinter_dim, bias=True),
+        nn.Dropout(args.hinter_drop)
+    )
+
     model = model.to(device)
+    guesser = guesser.to(device)
+    hinter = hinter.to(device)
 
     # Preprocessing the datasets
-    if args.task_name is not None:
-        sentence1_key, sentence2_key = task_to_keys[args.task_name]
-    else:
-        # Again, we try to have some nice defaults but don't hesitate to tweak to your use case.
-        non_label_column_names = [name for name in raw_datasets["train"].column_names if name != "label"]
-        if "sentence1" in non_label_column_names and "sentence2" in non_label_column_names:
-            sentence1_key, sentence2_key = "sentence1", "sentence2"
-        else:
-            if len(non_label_column_names) >= 2:
-                sentence1_key, sentence2_key = non_label_column_names[:2]
-            else:
-                sentence1_key, sentence2_key = non_label_column_names[0], None
-
-    # Some models have set the order of the labels to use, so let's make sure we do use it.
-    label_to_id = None
-    if (
-        model.config.label2id != PretrainedConfig(num_labels=num_labels).label2id
-        and args.task_name is not None
-        and not is_regression
-    ):
-        # Some have all caps in their config, some don't.
-        label_name_to_id = {k.lower(): v for k, v in model.config.label2id.items()}
-        if list(sorted(label_name_to_id.keys())) == list(sorted(label_list)):
-            logger.info(
-                f"The configuration of the model provided the following label correspondence: {label_name_to_id}. "
-                "Using it!"
-            )
-            label_to_id = {i: label_name_to_id[label_list[i]] for i in range(num_labels)}
-        else:
-            logger.warning(
-                "Your model seems to have been trained with labels, but they don't match the dataset: ",
-                f"model labels: {list(sorted(label_name_to_id.keys()))}, dataset labels: {list(sorted(label_list))}."
-                "\nIgnoring the model labels as a result.",
-            )
-    elif args.task_name is None and not is_regression:
-        label_to_id = {v: i for i, v in enumerate(label_list)}
-
-    if label_to_id is not None:
-        model.config.label2id = label_to_id
-        model.config.id2label = {id: label for label, id in config.label2id.items()}
-    elif args.task_name is not None and not is_regression:
-        model.config.label2id = {l: i for i, l in enumerate(label_list)}
-        model.config.id2label = {id: label for label, id in config.label2id.items()}
-
     padding = "max_length"
+    def get_tokens(list_of_lists, name, num_elts): # list of list of strings, each sublist is pos or neg list
+        arr = [elt2 for elt in list_of_lists for elt2 in elt] # flatten
+        tokens = tokenizer(arr, padding=padding, max_length=args.max_length, truncation=False)
+
+        # reshape to original number of rows
+        return {
+            f'{name}_{key}': ar(tokens[key]).reshape(len(list_of_lists), num_elts, -1) 
+            for key in tokens.keys()
+        }
 
     def preprocess_function(examples):
         # Tokenize the texts
-        texts = (
-            (examples[sentence1_key],) if sentence2_key is None else (examples[sentence1_key], examples[sentence2_key])
-        )
-        result = tokenizer(*texts, padding=padding, max_length=args.max_length, truncation=True)
-
-        if "label" in examples:
-            if label_to_id is not None:
-                # Map labels to IDs (not necessary for GLUE tasks)
-                result["labels"] = [label_to_id[l] for l in examples["label"]]
-            else:
-                # In all cases, rename the column to labels because the model will expect that.
-                result["labels"] = examples["label"]
+        pos = get_tokens(examples['pos'], 'pos', args.p)
+        neg = get_tokens(examples['neg'], 'neg', args.n)
+        result = {
+            **pos,
+            **neg
+        }
         return result
 
-    processed_datasets = raw_datasets.map(
+    processed_datasets = ds.map(
         preprocess_function,
         batched=True,
-        remove_columns=raw_datasets["train"].column_names,
         desc="Running tokenizer on dataset",
+        remove_columns=['pos', 'neg'],
     )
 
     train_dataset = processed_datasets["train"]
-    eval_dataset = processed_datasets["validation_matched" if args.task_name == "mnli" else "validation"]
+    eval_dataset = processed_datasets["valid"]
 
     data_collator = default_data_collator
 
@@ -393,6 +386,14 @@ def main():
         },
         {
             "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+            "weight_decay": 0.0,
+        },
+        {
+            "params": [p for n, p in guesser.named_parameters() if any(nd in n for nd in no_decay)],
+            "weight_decay": 0.0,
+        },
+        {
+            "params": [p for n, p in hinter.named_parameters() if any(nd in n for nd in no_decay)],
             "weight_decay": 0.0,
         },
     ]
@@ -419,66 +420,114 @@ def main():
     # Afterwards we recalculate our number of training epochs
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
-    # Get the metric function
-    if args.task_name is not None:
-        metric = evaluate.load("glue", args.task_name)
-    else:
-        metric = evaluate.load("accuracy")
-
     # Train!
     progress_bar = tqdm(range(args.max_train_steps))
     completed_steps = 0
     starting_epoch = 0
 
-    for epoch in range(starting_epoch, args.num_train_epochs):
-        model.train()
-        total_loss = 0
+    def model_forward(model, hinter,  guesser, batch, loss_fn):
+        ## get encodings of pos, neg, and hints
 
-        for step, batch in enumerate(train_dataloader):
-            batch = {k:v.type(torch.long).to(device) for k,v in batch.items()}
-            outputs = model(**batch)
-            loss = outputs.loss
-            # We keep track of the loss at each epoch
-            total_loss += loss.detach().float()
-            loss = loss / args.gradient_accumulation_steps
-            loss.backward()
-            
-            if step % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
-                progress_bar.update(1)
-                completed_steps += 1
+        # reformulate batch to be how model expects it
+        this_bs, p, seq_len = batch['pos_input_ids'].shape
+        assert args.p==p and this_bs==batch['neg_input_ids'].shape[0]
 
-            if completed_steps >= args.max_train_steps:
-                break
+        new_batch = { 'input_ids': None, 'attention_mask': None }
+        for k in new_batch.keys():
+            for split in ['pos', 'neg']:
+                if new_batch[k] is None: # pos
+                    new_batch[k] = batch[f'{split}_{k}'].reshape(-1, seq_len) # reshape so each seq processed separately
+                else:
+                    to_add = batch[f'{split}_{k}'].reshape(-1, seq_len)
+                    new_batch[k] = torch.cat([new_batch[k], to_add], dim=0) # pos then neg. total shape: (args.p+args.n)*bs, seq_len
+        
+        batch = new_batch
+        batch = {k:v.type(torch.long).to(device) for k,v in batch.items()}
+        batch['output_hidden_states'] = True
+        outputs = model(**batch)
+        cls_tokens = outputs['hidden_states'][-1][:,0] # bs, hidden_dim
+
+        with torch.no_grad():
+            labels = torch.cat([torch.ones(int(this_bs*args.p)), torch.zeros(int(this_bs*args.n))])
+            labels = labels.to(device)
+
+        # get hints
+        boundary = args.p*this_bs
+        pos_cls, neg_cls = cls_tokens[:boundary], cls_tokens[boundary:]
+        hinter_pos_cls = pos_cls.reshape(this_bs,args.p*args.hidden_size)
+        hinter_neg_cls = neg_cls.reshape(this_bs,args.n*args.hidden_size)
+        hinter_input = torch.cat([hinter_pos_cls, hinter_neg_cls], -1)
+        hints = hinter(hinter_input)
+
+        # guess
+        ## pos
+        pos_hint_expansion = hints[:,None,:].repeat(1,args.p,1)
+        pos_hint_expansion = pos_hint_expansion.reshape(this_bs*args.p, -1)
+        pos_guesser_in = torch.cat([pos_hint_expansion, pos_cls], -1)
+        pos_guesses = guesser(pos_guesser_in)
+
+        ## neg
+        neg_hint_expansion = hints[:,None,:].repeat(1,args.n,1)
+        neg_hint_expansion = neg_hint_expansion.reshape(this_bs*args.n, -1)
+        neg_guesser_in = torch.cat([neg_hint_expansion, neg_cls], -1)
+        neg_guesses = guesser(neg_guesser_in)
+
+        all_guesses = torch.cat([pos_guesses,neg_guesses], 0).reshape(-1)
+        loss = loss_fn(all_guesses, labels)
+
+        return loss
+
+    def eval_and_log(model, hinter, guesser, loss_fn, eval_dataloader, train_losses):
+        train_loss = np.mean(train_losses)
+        train_losses = []
 
         model.eval()
-        samples_seen = 0
+        eval_losses = []
         for step, batch in enumerate(eval_dataloader):
             with torch.no_grad():
-                batch = {k:v.type(torch.long).to(device) for k,v in batch.items()}
-                outputs = model(**batch)
-            predictions = outputs.logits.argmax(dim=-1) if not is_regression else outputs.logits.squeeze()
-            # predictions, references = accelerator.gather((predictions, batch["labels"]))
-            metric.add_batch(
-                predictions=predictions,
-                references=batch['labels'],
-            )
+                loss = model_forward(model, hinter, guesser, batch, loss_fn)
+                eval_losses.append(loss.item())
+        
+        eval_loss = np.mean(eval_losses)
 
-        eval_metric = metric.compute()
-        print(eval_metric)
+        print(f'train loss: {train_loss:.3f}')
+        print(f'valid loss: {eval_loss:.3f}')
 
         if 'debug' not in args._tags:
             wandb.log(
                 {
-                    "accuracy" if args.task_name is not None else "glue": eval_metric,
-                    "train_loss": total_loss.item() / len(train_dataloader),
-                    "epoch": epoch,
-                    "step": completed_steps,
+                    "train_loss": train_loss,
+                    "valid_loss": eval_loss,
+                    # "epoch": epoch,
+                    # "step": completed_steps,
                 },
                 step=completed_steps,
             )
+        model.train()
+
+    loss_fn = nn.MSELoss()
+    for epoch in range(starting_epoch, args.num_train_epochs):
+        model.train()
+        
+        train_losses = []
+        for step, batch in enumerate(train_dataloader):
+            loss = model_forward(model, hinter, guesser, batch, loss_fn)
+            loss.backward()
+            
+            train_losses.append(loss.item())
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad()
+            progress_bar.update(1)
+            completed_steps += 1
+
+            if completed_steps >= args.max_train_steps:
+                break
+            
+            if completed_steps % args.log_every == 0:
+                eval_and_log(model, hinter, guesser, loss_fn, eval_dataloader, train_losses)
+
+        eval_and_log(model, hinter, guesser, loss_fn, eval_dataloader, train_losses)
 
 if __name__ == "__main__":
     main()
