@@ -3,7 +3,9 @@ import sys; sys.path.append('/work/awilf/utils/'); from alex_utils import *
 import wandb
 import string
 from sklearn.metrics import accuracy_score
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 from scipy.special import comb
+from prompts import prompts, make_str
 
 arg_defaults = [
     ('--_tags', str, 'debug,gpt'), # NOTE: required if you use deploy_sweeps. please do not remove the _. Use 'debug' if you don't want wandb to sync.
@@ -12,17 +14,21 @@ arg_defaults = [
     ('--wdb_entity', str, 'socialiq'),
 
     # main arguments
-    ('--N', int, 10),
+    ('--N', int, 100),
     ('--n', int, 1),
     ('--p', int, 2),
     ('--np', int, 2), # -1 to use different n and p. by default, p=np, n=np-1. Must be > 1
+    ('--hinter_model', str, 'chatgpt'), # chatgpt or one of the 'flan-t5-*' models
     ('--guesser_model', str, 'chatgpt'),
     ('--guesser_num_retries', int, 3), # how many times to tell the guesser the answer wasn't formatted correctly
-    ('--guesser_few_shot', int, 0), # how many few shot examples to give
+    ('--guesser_few_shot', int, 3), # how many few shot examples to give
     ('--dataset', str, 'noun'), # nouns or siqa
 ]
 
-
+# hint_prompt = '''\
+# Question: What is the word that describes the words in Set A BUT NOT the words in Set B? Note: the answer should NOT be in either Set A or Set B.
+# Context: Set A: {}. Set B: {}.
+# Answer:'''
 hint_prompt = '''\
 The following is a game. The goal is to find a word that describes the words in Set A BUT NOT the words in Set B.
 Set A: {}
@@ -62,7 +68,7 @@ def get_phrasing():
     '''.format(', '.join(['word']*args.p), ', '.join(['word']*args.n))
     return a
 
-def get_base_prompt(hint, words):
+def get_guess_prompt(hint, words):
     # hint is str, words is arr
     a = srep('''\
     The following is a game. There are {} words in total, \
@@ -78,7 +84,7 @@ def get_answer(example):
     return f'''Set A: {example['seta']}\nSet B: {example['setb']}\n'''
 
 def get_full_example(example):
-    prompt = get_base_prompt(example['hint'], example['words'])
+    prompt = get_guess_prompt(example['hint'], example['words'])
     return [
         {'role': 'user', 'content': prompt},
         {'role': 'assistant', 'content': get_answer(example)}
@@ -89,7 +95,7 @@ def get_guess(all_words, hint):
     
     message_examples = [get_full_example(example) for example in examples][:args.guesser_few_shot]
     message_examples = [elt for arr in message_examples for elt in arr]  # flatten
-    base_prompt = get_base_prompt(hint, words)
+    base_prompt = get_guess_prompt(hint, words)
     m = [
         {"role": "system", "content": "You are a helpful assistant."},
         *message_examples,
@@ -144,6 +150,50 @@ def get_guess(all_words, hint):
         print('Failed to get a well formed response from chatgpt; here is the message history:\n','\n###\n'.join(lmap(lambda elt: elt['content'], m)))
     return y_pred, y_true, m
 
+def get_hint_chatgpt(pos,neg):
+    this_hint_prompt = hint_prompt.format(', '.join(pos), ', '.join(neg))
+    res=openai.ChatCompletion.create(
+    model="gpt-3.5-turbo",
+    messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": this_hint_prompt},
+            # {"role": "assistant", "content": "The Los Angeles Dodgers won the World Series in 2020."},
+            # {"role": "user", "content": "Where was it played?"}
+        ],
+    )
+    hint = res.choices[0].message.content.split(' ')[0].translate(str.maketrans('', '', string.punctuation))
+    return hint
+
+def get_hint_example(ex):
+    return hint_prompt.format(ex['seta'], ex['setb']) + ' ' + ex['hint']
+
+def get_hint_prompt(pos,neg):
+    hint_examples = [get_hint_example(ex) for ex in examples][:args.guesser_few_shot]
+    this_example = [hint_prompt.format(', '.join(pos), ', '.join(neg))]
+    this_hint_prompt = '\n###\n'.join(hint_examples + this_example)
+    return this_hint_prompt
+
+def get_model_out(prompt):
+    # inputs = tokenizer("A step by step recipe to make bolognese pasta:", return_tensors="pt")
+    inputs = tokenizer(prompt, return_tensors="pt")
+    inputs = inputs.to('cuda')
+    outputs = model.generate(**inputs)
+    outputs = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
+    return outputs
+
+def get_hint_flan(pos,neg):
+    this_hint_prompt = get_hint_prompt(pos,neg)
+    this_hint = get_model_out(this_hint_prompt)
+    print(f"pos: {', '.join(pos)}\nneg: {', '.join(neg)}\nhint: {this_hint}")
+    hi=2
+    return this_hint
+    
+def get_hint(pos, neg):
+    if 'flan-t5' in args.hinter_model:
+        return get_hint_flan(pos,neg)
+    else:
+        return get_hint_chatgpt(pos,neg)
+
 def main():
     global args
     
@@ -164,6 +214,12 @@ def main():
             config=vars(args),
             tags=args._tags.split(','),
         )
+
+    if 'flan-t5' in args.hinter_model:
+        global model, tokenizer
+        model = AutoModelForSeq2SeqLM.from_pretrained(f"google/{args.hinter_model}")
+        model = model.to('cuda')
+        tokenizer = AutoTokenizer.from_pretrained(f"google/{args.hinter_model}")
 
     openai.api_key = read_txt('open_ai_key.txt').strip().rstrip()
     nouns = read_txt('nouns.txt').split('\n')
@@ -186,17 +242,7 @@ def main():
         results['negatives'].append(neg)
 
         # hint
-        this_hint_prompt = hint_prompt.format(', '.join(pos), ', '.join(neg))
-        res=openai.ChatCompletion.create(
-        model="gpt-3.5-turbo",
-        messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": this_hint_prompt},
-                # {"role": "assistant", "content": "The Los Angeles Dodgers won the World Series in 2020."},
-                # {"role": "user", "content": "Where was it played?"}
-            ],
-        )
-        hint = res.choices[0].message.content.split(' ')[0].translate(str.maketrans('', '', string.punctuation))
+        hint = get_hint(pos,neg)
         results['hints'].append(hint)
 
         # guess
@@ -213,9 +259,10 @@ def main():
             results['y_pred'].append(_y_pred)
             results['y_true'].append(_y_true)
 
+    # bookkeeping
     results['y_true'] = ar(results['y_true'])
     results['y_pred'] = ar(results['y_pred'])
-    corr_arr = (results['y_true'] == results['y_pred']).all(-1)
+    corr_arr = (ar(results['y_true']) == ar(results['y_pred'])).all(-1)
     results['total_acc'] = corr_arr.sum() / corr_arr.shape[0]
     print('Accuracy:', results['total_acc'])
     random_acc = 1/comb(args.n+args.p, args.p)
