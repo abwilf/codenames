@@ -5,7 +5,9 @@ import string
 from sklearn.metrics import accuracy_score
 from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 from scipy.special import comb
-from prompts import prompts, make_str
+from test_flan import get_prompt as get_hint_prompt_flan
+import prompts
+from inspect import getmembers, isfunction
 
 arg_defaults = [
     ('--_tags', str, 'debug,gpt'), # NOTE: required if you use deploy_sweeps. please do not remove the _. Use 'debug' if you don't want wandb to sync.
@@ -14,15 +16,16 @@ arg_defaults = [
     ('--wdb_entity', str, 'socialiq'),
 
     # main arguments
-    ('--N', int, 100),
+    ('--N', int, 15),
     ('--n', int, 1),
     ('--p', int, 2),
     ('--np', int, 2), # -1 to use different n and p. by default, p=np, n=np-1. Must be > 1
-    ('--hinter_model', str, 'chatgpt'), # chatgpt or one of the 'flan-t5-*' models
+    ('--hinter_model', str, 'flan-t5-small'), # chatgpt or one of the 'flan-t5-*' models
     ('--guesser_model', str, 'chatgpt'),
     ('--guesser_num_retries', int, 3), # how many times to tell the guesser the answer wasn't formatted correctly
     ('--guesser_few_shot', int, 3), # how many few shot examples to give
     ('--dataset', str, 'noun'), # nouns or siqa
+    ('--prompt_idx', int, 6), # which prompt idx to try?
 ]
 
 # hint_prompt = '''\
@@ -164,17 +167,7 @@ def get_hint_chatgpt(pos,neg):
     hint = res.choices[0].message.content.split(' ')[0].translate(str.maketrans('', '', string.punctuation))
     return hint
 
-def get_hint_example(ex):
-    return hint_prompt.format(ex['seta'], ex['setb']) + ' ' + ex['hint']
-
-def get_hint_prompt(pos,neg):
-    hint_examples = [get_hint_example(ex) for ex in examples][:args.guesser_few_shot]
-    this_example = [hint_prompt.format(', '.join(pos), ', '.join(neg))]
-    this_hint_prompt = '\n###\n'.join(hint_examples + this_example)
-    return this_hint_prompt
-
 def get_model_out(prompt):
-    # inputs = tokenizer("A step by step recipe to make bolognese pasta:", return_tensors="pt")
     inputs = tokenizer(prompt, return_tensors="pt")
     inputs = inputs.to('cuda')
     outputs = model.generate(**inputs)
@@ -182,10 +175,10 @@ def get_model_out(prompt):
     return outputs
 
 def get_hint_flan(pos,neg):
-    this_hint_prompt = get_hint_prompt(pos,neg)
+    all_prompts = dict(lfilter(lambda elt: 'prompt' in elt[0], getmembers(prompts, isfunction)))
+    prompt_fn = all_prompts[f'prompt{args.prompt_idx}']
+    this_hint_prompt = get_hint_prompt_flan(pos,neg, prompt_fn)
     this_hint = get_model_out(this_hint_prompt)
-    print(f"pos: {', '.join(pos)}\nneg: {', '.join(neg)}\nhint: {this_hint}")
-    hi=2
     return this_hint
     
 def get_hint(pos, neg):
@@ -231,26 +224,25 @@ def main():
         'positives': [],
         'negatives': [],
         'hints': [],
-        'failed': []
+        'failed': [],
+        'overlap': [], # whether hint is one of the pos / neg words
     }
     num_badly_formed = 0
     for i in tqdm(range(args.N)):
         group = np.random.choice(nouns, size=args.n+args.p, replace=False)
         pos = group[:args.p]
         neg = group[args.p:]
-        results['positives'].append(pos)
-        results['negatives'].append(neg)
 
         # hint
         hint = get_hint(pos,neg)
-        results['hints'].append(hint)
+        orig_pos = pos
+        orig_neg = neg
 
         # guess
         pos = lmap(lambda elt: (elt, 1), pos)
         neg = lmap(lambda elt: (elt, 0), neg)
         all_words = pos + neg
         random.shuffle(all_words)
-        results['words'].append(all_words)
 
         _y_pred, _y_true, m = get_guess(all_words, hint)
         if _y_pred is None:
@@ -258,7 +250,12 @@ def main():
         else:
             results['y_pred'].append(_y_pred)
             results['y_true'].append(_y_true)
-
+            results['hints'].append(hint)
+            results['overlap'].append(int((hint in orig_pos) or (hint in orig_neg)))
+            results['positives'].append(orig_pos)
+            results['negatives'].append(orig_neg)
+            results['words'].append(all_words)
+            
     # bookkeeping
     results['y_true'] = ar(results['y_true'])
     results['y_pred'] = ar(results['y_pred'])
@@ -268,7 +265,16 @@ def main():
     random_acc = 1/comb(args.n+args.p, args.p)
     print('Random Accuracy: ', random_acc)
     print(f'Number failed: {len(results["failed"])}')
-    
+
+    df = pd.DataFrame({
+        'pos': lmap(lambda elt: ', '.join(list(elt)), results['positives']),
+        'neg': lmap(lambda elt: ', '.join(list(elt)), results['negatives']),
+        'hint': results['hints'],
+        'overlap': results['overlap'],
+        'corr?': lmap(lambda elt: int(elt), corr_arr),
+    })
+    write_txt(join('prompt_logs', f'{args.prompt_idx}.txt'), str(df))
+
     if 'debug' not in args._tags:
         wandb.summary['accuracy'] = results['total_acc']
         wandb.summary['random_acc'] = random_acc

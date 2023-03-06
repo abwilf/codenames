@@ -2,23 +2,16 @@ program: gpt_gh_test.py
 method: grid
 parameters:
   seed: 42
-  N: 100
+  N: 50
+  hinter_model: flan-t5-xl
   guesser_model: chatgpt
   dataset: noun
 
   subtests:
-    np_tests:
-      np:
-        - 2
-        - 3
-        - 4
-        - 5
-        - 6
-        - 7
-        - 8
-    few_shot:
-      guesser_few_shot:
-      - 0
-      - 1
-      - 2
-      - 3
+    prompt_tests:
+      prompt_idx:
+      # - 0
+      # - 1
+      - 6
+      # - 7
+      # - 8
